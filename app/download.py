@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import DOWNLOAD_DIR, DOWNLOAD_TIMEOUT, MAX_DOWNLOAD_BYTES, MOBILE_UA, UA
 from .engines.ytdlp import YtDlpEngine
 from .jobs import Job, STORE
+from .urls import ytdlp_url
 from .util import hostname_of, is_hls, sanitize_filename
 
 log = logging.getLogger("unwatermark")
@@ -15,52 +16,65 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def materialize(job: Job) -> Path:
-    if job.filepath and Path(job.filepath).is_file() and Path(job.filepath).stat().st_size > 0:
-        return Path(job.filepath)
+    with job.lock:
+        if job.filepath and Path(job.filepath).is_file() and Path(job.filepath).stat().st_size > 0:
+            return Path(job.filepath)
 
-    stem = sanitize_filename(job.title or "video") + "_" + job.id[:8]
-    outtmpl = str(DOWNLOAD_DIR / (stem + ".%(ext)s"))
+        stem = sanitize_filename(job.title or "video") + "_" + job.id[:8]
+        outtmpl = str(DOWNLOAD_DIR / (stem + ".%(ext)s"))
+        ydl_target = ytdlp_url(job.page_url)
+        extra_headers = (job.extra or {}).get("http_headers")
 
-    path: Path | None = None
-    engine = (job.extractor or "yt-dlp").lower()
-    if engine == "yt-dlp" or job.needs_merge or is_hls(job.direct_url):
-        ydl = YtDlpEngine()
-        raw = ydl.download_to(job.page_url, outtmpl)
-        if raw:
-            path = Path(raw)
-    elif engine == "videofetch":
-        from .engines.videofetch_engine import VideofetchEngine
+        path: Path | None = None
+        engine = (job.extractor or "yt-dlp").lower()
+        if engine == "yt-dlp" or job.needs_merge or is_hls(job.direct_url):
+            ydl = YtDlpEngine()
+            raw = ydl.download_to(ydl_target, outtmpl)
+            if raw:
+                path = Path(raw)
+        elif engine == "videofetch":
+            from .engines.videofetch_engine import VideofetchEngine
 
-        raw = VideofetchEngine().download_to(job.page_url, str(DOWNLOAD_DIR))
-        if raw:
-            path = Path(raw)
-    elif engine == "you-get":
-        from .engines.youget import YouGetEngine
+            raw = VideofetchEngine().download_to(job.page_url, str(DOWNLOAD_DIR))
+            if raw:
+                path = Path(raw)
+        elif engine == "you-get":
+            from .engines.youget import YouGetEngine
 
-        raw = YouGetEngine().download_to(job.page_url, str(DOWNLOAD_DIR), stem)
-        if raw:
-            path = Path(raw)
+            raw = YouGetEngine().download_to(job.page_url, str(DOWNLOAD_DIR), stem)
+            if raw:
+                path = Path(raw)
 
-    if path is None and job.direct_url and job.direct_url.startswith("http") and not is_hls(job.direct_url):
-        path = _http_download(job.direct_url, DOWNLOAD_DIR / f"{stem}.{job.ext or 'mp4'}", page_url=job.page_url)
+        if path is None and job.direct_url and job.direct_url.startswith("http") and not is_hls(job.direct_url):
+            path = _http_download(
+                job.direct_url,
+                DOWNLOAD_DIR / f"{stem}.{job.ext or 'mp4'}",
+                page_url=job.page_url,
+                extra_headers=extra_headers,
+            )
 
-    if path is None or not path.is_file():
-        # last resort: yt-dlp on the original page
-        raw = YtDlpEngine().download_to(job.page_url, outtmpl)
-        if raw:
-            path = Path(raw)
+        if path is None or not path.is_file():
+            # last resort: yt-dlp on the original page
+            raw = YtDlpEngine().download_to(ydl_target, outtmpl)
+            if raw:
+                path = Path(raw)
 
-    if path is None or not path.is_file():
-        raise RuntimeError("下载失败")
-    if path.stat().st_size > MAX_DOWNLOAD_BYTES:
-        path.unlink(missing_ok=True)
-        raise RuntimeError("文件过大，已取消")
-    STORE.set_path(job.id, path)
-    log.info("download job=%s size=%s", job.id, path.stat().st_size)
-    return path
+        if path is None or not path.is_file():
+            raise RuntimeError("下载失败")
+        if path.stat().st_size > MAX_DOWNLOAD_BYTES:
+            path.unlink(missing_ok=True)
+            raise RuntimeError("文件过大，已取消")
+        STORE.set_path(job.id, path)
+        log.info("download job=%s size=%s", job.id, path.stat().st_size)
+        return path
 
 
-def _http_download(url: str, dest: Path, page_url: str | None = None) -> Path | None:
+def _http_download(
+    url: str,
+    dest: Path,
+    page_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Path | None:
     try:
         import httpx
     except Exception:
@@ -68,7 +82,8 @@ def _http_download(url: str, dest: Path, page_url: str | None = None) -> Path | 
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT, headers=_dl_headers(url, page_url)) as client:
+        headers = _dl_headers(url, page_url, extra_headers=extra_headers)
+        with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT, headers=headers) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 written = 0
@@ -85,8 +100,12 @@ def _http_download(url: str, dest: Path, page_url: str | None = None) -> Path | 
         return None
 
 
-def _dl_headers(url: str, page_url: str | None = None) -> dict[str, str]:
-    """Headers CDNs expect for Douyin/Kuaishou progressive MP4."""
+def _dl_headers(
+    url: str,
+    page_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Headers CDNs expect for Douyin/Kuaishou progressive MP4 (and yt-dlp overrides)."""
     blob = " ".join(x for x in (url, page_url) if x).lower()
     host = hostname_of(page_url or "") or hostname_of(url)
     if any(k in blob for k in ("kuaishou", "chenzhongtech", "kwai.com", "gifshow")):
@@ -99,10 +118,15 @@ def _dl_headers(url: str, page_url: str | None = None) -> dict[str, str]:
         referer = f"https://{host}/"
     else:
         referer = "https://www.douyin.com/"
-    return {
-        "User-Agent": MOBILE_UA,
+    base = {
+        "User-Agent": MOBILE_UA if any(k in blob for k in ("douyin", "iesdouyin", "kuaishou", "chenzhongtech", "kwimgs", "yximgs")) else UA,
         "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": referer,
     }
+    if isinstance(extra_headers, dict):
+        for k, v in extra_headers.items():
+            if k and v and k.lower() not in {"accept-encoding", "host", "content-length"}:
+                base[k] = str(v)
+    return base
 

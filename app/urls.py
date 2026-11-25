@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 from .config import MOBILE_UA, UA
 from .util import hostname_of
+
+SHORT_LINK_HOSTS = {
+    "v.douyin.com",
+    "iesdouyin.com",
+    "b23.tv",
+    "xhslink.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com",
+    "t.cn",
+}
 
 AWEME_RE = re.compile(
     r"/(?:share/)?(?:video|note|slides)/(\d+)|modal_id=(\d+)|aweme_id=(\d+)",
@@ -54,17 +63,17 @@ def photo_id_of(url: str) -> str | None:
 def _follow(url: str, ua: str, timeout: float = 10.0) -> str:
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout, headers={"User-Agent": ua}) as client:
-            resp = client.get(url)
-            return str(resp.url) or url
+            with client.stream("GET", url) as resp:
+                return str(resp.url) or url
     except Exception:
         return url
 
 
 def expand_share_url(url: str) -> str:
-    """Follow v.douyin.com / v.kuaishou.com redirects. Safe no-op on failure."""
+    """Follow v.douyin.com / v.kuaishou.com and common short-link redirects. Safe no-op on failure."""
     host = hostname_of(url)
-    if host in {"v.douyin.com", "www.iesdouyin.com"} or host.startswith("v."):
-        followed = _follow(url, MOBILE_UA if is_douyin(url) else UA)
+    if host in SHORT_LINK_HOSTS or host.startswith("v."):
+        followed = _follow(url, MOBILE_UA if is_douyin(url) or is_kuaishou(url) else UA)
         if followed:
             url = followed
     if is_kuaishou(url):
@@ -111,7 +120,7 @@ def ytdlp_url(url: str, expanded: str | None = None) -> str:
         if aid:
             return f"https://www.douyin.com/video/{aid}"
     if is_kuaishou(url) or is_kuaishou(expanded):
-        pid = photo_id_of(expanded or url)
+        pid = photo_id_of(expanded) or photo_id_of(url)
         if pid:
             return f"https://www.kuaishou.com/short-video/{pid}"
     return expanded or url

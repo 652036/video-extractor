@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from .config import DOWNLOAD_TIMEOUT
 from .download import _dl_headers
@@ -18,7 +19,23 @@ log = logging.getLogger("unwatermark")
 router = APIRouter()
 
 _TIMEOUT = httpx.Timeout(connect=20.0, read=DOWNLOAD_TIMEOUT, write=30.0, pool=20.0)
+_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=16)
 _UNSUPPORTED = {"ok": False, "error": "该格式暂不支持预览"}
+_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _CLIENT
+    if _CLIENT is None or _CLIENT.is_closed:
+        _CLIENT = httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT, limits=_LIMITS)
+    return _CLIENT
+
+
+async def close_client() -> None:
+    global _CLIENT
+    if _CLIENT is not None and not _CLIENT.is_closed:
+        await _CLIENT.aclose()
+    _CLIENT = None
 
 
 def _media_type(upstream: str | None, ext: str | None) -> str:
@@ -40,26 +57,35 @@ async def preview(request: Request, job: str = Query(..., min_length=8, max_leng
     item = STORE.get(job)
     if item is None:
         raise HTTPException(404, "任务不存在或已过期，请重新解析")
-    if not item.direct_url or not item.direct_url.startswith("http") or is_hls(item.direct_url):
+
+    # Serve already-downloaded local file directly (supports Range/seeking even for merged DASH/HLS).
+    if item.filepath and Path(item.filepath).is_file() and Path(item.filepath).stat().st_size > 0:
+        media = _media_type(None, Path(item.filepath).suffix or item.ext)
+        return FileResponse(item.filepath, media_type=media, headers={"Cache-Control": "no-store"})
+
+    extra = item.extra or {}
+    target_url = item.direct_url or extra.get("preview_direct_url")
+    if not target_url or not str(target_url).startswith("http") or is_hls(target_url):
         return JSONResponse(_UNSUPPORTED, status_code=415)
 
-    headers = _dl_headers(item.direct_url, item.page_url)
+    headers = _dl_headers(target_url, item.page_url, extra_headers=extra.get("http_headers"))
     rng = request.headers.get("range")
     if rng:
         headers["Range"] = rng
+    elif request.method == "HEAD":
+        # Avoid initiating a full upstream body transfer for HEAD metadata probes.
+        headers["Range"] = "bytes=0-0"
 
-    client = httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT)
+    client = _get_client()
     try:
-        req = client.build_request("GET", item.direct_url, headers=headers)
+        req = client.build_request("GET", target_url, headers=headers)
         resp = await client.send(req, stream=True)
     except Exception as exc:
-        await client.aclose()
         log.warning("preview upstream open failed job=%s err=%s", job, exc)
         raise HTTPException(502, "预览失败") from exc
 
     if resp.status_code >= 400:
         await resp.aclose()
-        await client.aclose()
         log.warning("preview upstream status=%s job=%s", resp.status_code, job)
         raise HTTPException(502, "预览失败")
 
@@ -76,8 +102,14 @@ async def preview(request: Request, job: str = Query(..., min_length=8, max_leng
         out["Content-Length"] = resp.headers["content-length"]
 
     if request.method == "HEAD":
+        # If we probed with Range: bytes=0-0, derive full Content-Length from Content-Range.
+        if not rng and resp.headers.get("content-range") and "/" in resp.headers["content-range"]:
+            total = resp.headers["content-range"].rsplit("/", 1)[-1].strip()
+            if total.isdigit():
+                out["Content-Length"] = total
+            out.pop("Content-Range", None)
+            status = 200
         await resp.aclose()
-        await client.aclose()
         return Response(status_code=status, media_type=media, headers=out)
 
     async def body():
@@ -86,6 +118,5 @@ async def preview(request: Request, job: str = Query(..., min_length=8, max_leng
                 yield chunk
         finally:
             await resp.aclose()
-            await client.aclose()
 
     return StreamingResponse(body(), status_code=status, media_type=media, headers=out)

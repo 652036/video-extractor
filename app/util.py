@@ -7,17 +7,21 @@ from urllib.parse import unquote, urlparse
 
 from .config import BLOCKED_HOSTS, PLATFORM_HINTS, WECHAT_CHANNELS_HINTS
 
-URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
-TRAIL_PUNCT = ".,;:!?)]}>\"'`，。；：！？、）】」』》…"
+# Stop before whitespace, HTML delimiters, or CJK/full-width characters common in CN share slogans.
+URL_RE = re.compile(
+    r"https?://[^\s<>\"'`\u2000-\u206f\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]+",
+    re.IGNORECASE,
+)
+TRAIL_PUNCT = ".,;:!?)]}>\"'`，。；：！？、）】」』》…／"
 
 
 def extract_url(text: str) -> str | None:
     if not text:
         return None
     raw = text.strip()
-    if raw.startswith("http://") or raw.startswith("https://"):
-        # still strip trailing junk from a bare URL
-        return _clean_url(raw.split()[0])
+    # Handle fully percent-encoded URLs (e.g. https%3A%2F%2F...) without corrupting normal query strings.
+    if re.match(r"^https?%3a%2f%2f", raw, re.IGNORECASE):
+        raw = unquote(raw)
     m = URL_RE.search(raw)
     if not m:
         return None
@@ -25,13 +29,12 @@ def extract_url(text: str) -> str | None:
 
 
 def _clean_url(url: str) -> str:
-    url = unquote(url.strip())
-    url = url.rstrip(TRAIL_PUNCT)
-    # chinese share links sometimes wrap the URL in extra full-width slash
+    url = url.strip().rstrip(TRAIL_PUNCT)
+    # Chinese share links sometimes trail with stray slashes before punctuation
     url = url.rstrip("/").rstrip(TRAIL_PUNCT)
     if "://" in url:
         scheme, rest = url.split("://", 1)
-        url = scheme + "://" + rest
+        url = scheme.lower() + "://" + rest
     return url
 
 
@@ -106,10 +109,12 @@ def looks_like_login_error(msg: str) -> bool:
         "cookies",
         "cookie",
         "authentication",
+        "unauthorized",
+        "http error 401",
+        "not a bot",
         "private video",
         "login",
         "登录",
-        "cookie",
         "需要登录",
     )
     return any(k in text for k in keys)
