@@ -36,6 +36,7 @@
         <p class="fine" id="cookieHint">cookies_from_browser 仅在这台电脑上跑服务时有效。</p>
       </details>
       <div class="row">
+        <button id="clear" type="button" class="ghost">清空</button>
         <button id="paste" type="button" class="ghost">粘贴</button>
         <button id="parse" type="button" class="primary">解析</button>
       </div>
@@ -50,7 +51,10 @@
         <p class="meta"><span id="platform"></span><span id="engine"></span></p>
         <h2 id="title"></h2>
         <p id="info" class="muted"></p>
-        <a id="dl" class="primary btn" href="#">下载视频</a>
+        <div class="actions">
+          <a id="dl" class="primary btn" href="#">下载视频</a>
+          <button id="copyDirect" type="button" class="ghost" hidden>复制直链</button>
+        </div>
       </div>
     </section>
 
