@@ -29,6 +29,8 @@ def extract_url(text: str) -> str | None:
 
 
 def _clean_url(url: str) -> str:
+    # Decoding an entire URL changes reserved delimiters and signed payloads.
+    # Remove surrounding share-text punctuation without touching percent escapes.
     url = url.strip().rstrip(TRAIL_PUNCT)
     # Chinese share links sometimes trail with stray slashes before punctuation
     url = url.rstrip("/").rstrip(TRAIL_PUNCT)
@@ -40,7 +42,7 @@ def _clean_url(url: str) -> str:
 
 def hostname_of(url: str) -> str:
     try:
-        host = (urlparse(url).hostname or "").lower()
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
     except Exception:
         return ""
     if host.startswith("www."):
