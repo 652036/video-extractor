@@ -125,12 +125,19 @@ def _is_mp4(status: int, content_type: str, body: bytes) -> bool:
 def _verify_httpx(url: str) -> bool:
     try:
         with httpx.Client(follow_redirects=True, timeout=8.0, headers=RANGE_HEADERS) as client:
-            resp = client.get(url)
-        ok = _is_mp4(resp.status_code, resp.headers.get("content-type") or "", resp.content or b"")
+            with client.stream("GET", url) as resp:
+                buf = bytearray()
+                for chunk in resp.iter_bytes(2048):
+                    buf.extend(chunk)
+                    if len(buf) >= 2048:
+                        break
+                status = resp.status_code
+                ct = resp.headers.get("content-type") or ""
+        ok = _is_mp4(status, ct, bytes(buf[:2048]))
         log.info(
             "douyin-browser range status=%s ct=%s host=%s ok=%s",
-            resp.status_code,
-            (resp.headers.get("content-type") or "")[:32],
+            status,
+            ct[:32],
             urlparse(url).hostname,
             ok,
         )
@@ -202,31 +209,26 @@ def _nudge_play(page) -> None:
         pass
 
 
-def _harvest_html_play(page) -> tuple[list[str], str | None]:
+def _harvest_html_play(page) -> tuple[list[str], str | None, str | None]:
     try:
         html = page.content() or ""
     except Exception:
-        return [], None
-    title = None
+        return [], None, None
     try:
         from .sharepage import _dewatermark, _parse_douyin_html
 
         parsed = _parse_douyin_html(page.url or "", html)
     except Exception:
-        return [], None
+        return [], None, None
     if not parsed:
-        return [], None
+        return [], None, None
     title = parsed.get("title")
+    thumb = parsed.get("thumbnail")
     direct = parsed.get("direct_url")
     if not direct:
-        return [], title
-    try:
-        from .sharepage import _dewatermark
-
-        direct = _dewatermark(direct)
-    except Exception:
-        pass
-    return [direct], title
+        return [], title, thumb
+    direct = _dewatermark(direct)
+    return [direct], title, thumb
 
 
 def _title_of(page) -> str:
@@ -247,13 +249,13 @@ def _title_of(page) -> str:
     return title or "douyin"
 
 
-def _ok(url: str, *, title: str, direct: str, page: str) -> dict:
+def _ok(url: str, *, title: str, direct: str, page: str, thumb: str | None = None) -> dict:
     return {
         "ok": True,
         "title": title or "douyin",
         "ext": "mp4",
         "filesize": None,
-        "thumbnail": None,
+        "thumbnail": thumb if isinstance(thumb, str) else None,
         "extractor": NAME,
         "extractor_key": "DouyinBrowser",
         "platform": platform_of(url, "Douyin"),
@@ -309,6 +311,7 @@ def _extract_locked(url: str) -> dict:
     seen: set[str] = set()
     failed_verify: set[str] = set()
     title = "douyin"
+    thumb: str | None = None
     page_url = target
     deadline = time.monotonic() + TIMEOUT_S
 
@@ -350,8 +353,23 @@ def _extract_locked(url: str) -> dict:
             if _verify(cand, page):
                 title = title if title and title != "douyin" else _title_of(page)
                 log.info("douyin-browser ok host=%s title=%s", urlparse(cand).hostname, (title or "")[:40])
-                return _ok(url, title=title, direct=cand, page=page.url or page_url)
+                return _ok(url, title=title, direct=cand, page=page.url or page_url, thumb=thumb)
             failed_verify.add(cand)
+        return None
+
+    def check_html(page) -> dict | None:
+        nonlocal title, thumb
+        extras, html_title, html_thumb = _harvest_html_play(page)
+        if html_title:
+            title = html_title
+        if html_thumb:
+            thumb = html_thumb
+        for extra in extras:
+            add(extra)
+            if extra not in failed_verify and _verify(extra, page):
+                log.info("douyin-browser html-play ok host=%s", urlparse(extra).hostname)
+                return _ok(url, title=title, direct=extra, page=page.url or page_url, thumb=thumb)
+            failed_verify.add(extra)
         return None
 
     last_err = "未捕获到视频地址"
@@ -359,71 +377,29 @@ def _extract_locked(url: str) -> dict:
         with sync_playwright() as p:
             browser = _launch_browser(p)
             try:
-                # 1) Desktop: iesdouyin trailing-slash → www.douyin.com/video (proven).
-                desktop = browser.new_context(
+                # 1) Mobile share flow first: www.douyin.com/video/{id} passes WAF and redirects
+                # to m.douyin.com/share/video/{id} whose SSR HTML immediately embeds play_addr.
+                mobile = browser.new_context(
                     locale="zh-CN",
                     timezone_id="Asia/Shanghai",
-                    viewport={"width": 1280, "height": 800},
-                    user_agent=UA,
+                    viewport={"width": 390, "height": 844},
+                    user_agent=IPHONE_UA,
+                    is_mobile=True,
+                    has_touch=True,
                     extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
                 )
-                desktop.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-                )
-                dpage = desktop.new_page()
-                attach(dpage)
-                remain_ms = int(max(3.0, min(10.0, deadline - time.monotonic()) * 1000))
-                dpage.goto(target, wait_until="domcontentloaded", timeout=remain_ms)
                 try:
-                    dpage.wait_for_url("**/*douyin.com/video/**", timeout=5000)
-                except Exception:
-                    pass
-                page_url = dpage.url or target
-                title = _title_of(dpage)
-                # Login QR may appear. Do not click, dismiss, or fill it.
-                desktop_until = min(deadline, time.monotonic() + 6.0)
-                while time.monotonic() < desktop_until:
-                    _nudge_play(dpage)
-                    for name in _collect_perf(dpage):
-                        add(name)
-                    extras, html_title = _harvest_html_play(dpage)
-                    if html_title:
-                        title = html_title
-                    for extra in extras:
-                        add(extra)
-                        if extra not in failed_verify and _verify(extra, dpage):
-                            title = html_title or title
-                            log.info("douyin-browser html-play ok host=%s", urlparse(extra).hostname)
-                            return _ok(url, title=title, direct=extra, page=dpage.url or page_url)
-                        failed_verify.add(extra)
-                    hit = try_candidates(dpage)
-                    if hit:
-                        return hit
-                    dpage.wait_for_timeout(350)
-
-                # 2) Mobile share page: Chrome passes WAF; SSR embeds play_addr.
-                if time.monotonic() < deadline - 2:
-                    mobile = browser.new_context(
-                        locale="zh-CN",
-                        timezone_id="Asia/Shanghai",
-                        viewport={"width": 390, "height": 844},
-                        user_agent=IPHONE_UA,
-                        is_mobile=True,
-                        has_touch=True,
-                        extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-                    )
                     mobile.add_init_script(
                         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
                     )
                     mpage = mobile.new_page()
                     attach(mpage)
-                    # Trailing-slash iesdouyin first (required), then m.douyin share.
                     mobile_targets = []
                     if aid:
                         mobile_targets.append(f"https://www.douyin.com/video/{aid}")
                     mobile_targets.append(target)
                     for mt in mobile_targets:
-                        if time.monotonic() >= deadline:
+                        if time.monotonic() >= deadline - 1.5:
                             break
                         try:
                             mpage.goto(
@@ -435,29 +411,63 @@ def _extract_locked(url: str) -> dict:
                             log.info("douyin-browser mobile goto fail %s: %s", mt, exc)
                             continue
                         page_url = mpage.url or page_url
-                        mobile_until = min(deadline, time.monotonic() + 8.0)
+                        mobile_until = min(deadline, time.monotonic() + 5.0)
                         while time.monotonic() < mobile_until:
                             t = _title_of(mpage)
                             if t and t != "douyin":
                                 title = t
-                            extras, html_title = _harvest_html_play(mpage)
-                            if html_title:
-                                title = html_title
-                            for extra in extras:
-                                add(extra)
-                                if extra not in failed_verify and _verify(extra, mpage):
-                                    title = html_title or title
-                                    log.info("douyin-browser html-play ok host=%s", urlparse(extra).hostname)
-                                    return _ok(url, title=title, direct=extra, page=mpage.url or page_url)
-                                failed_verify.add(extra)
+                            hit = check_html(mpage)
+                            if hit:
+                                return hit
                             for name in _collect_perf(mpage):
                                 add(name)
                             hit = try_candidates(mpage)
                             if hit:
                                 return hit
-                            mpage.wait_for_timeout(300)
+                            mpage.wait_for_timeout(250)
+                finally:
                     mobile.close()
-                desktop.close()
+
+                # 2) Desktop fallback: iesdouyin trailing-slash -> www.douyin.com/video.
+                if time.monotonic() < deadline - 2.0:
+                    desktop = browser.new_context(
+                        locale="zh-CN",
+                        timezone_id="Asia/Shanghai",
+                        viewport={"width": 1280, "height": 800},
+                        user_agent=UA,
+                        extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+                    )
+                    try:
+                        desktop.add_init_script(
+                            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                        )
+                        dpage = desktop.new_page()
+                        attach(dpage)
+                        remain_ms = int(max(3.0, min(10.0, deadline - time.monotonic())) * 1000)
+                        dpage.goto(target, wait_until="domcontentloaded", timeout=remain_ms)
+                        try:
+                            dpage.wait_for_url("**/*douyin.com/video/**", timeout=4000)
+                        except Exception:
+                            pass
+                        page_url = dpage.url or target
+                        t = _title_of(dpage)
+                        if t and t != "douyin":
+                            title = t
+                        # Login QR may appear. Do not click, dismiss, or fill it.
+                        desktop_until = min(deadline, time.monotonic() + 6.0)
+                        while time.monotonic() < desktop_until:
+                            _nudge_play(dpage)
+                            for name in _collect_perf(dpage):
+                                add(name)
+                            hit = check_html(dpage)
+                            if hit:
+                                return hit
+                            hit = try_candidates(dpage)
+                            if hit:
+                                return hit
+                            dpage.wait_for_timeout(300)
+                    finally:
+                        desktop.close()
                 last_err = f"超时未拿到可播放地址（候选 {len(candidates)}）"
             finally:
                 browser.close()
@@ -469,5 +479,5 @@ def _extract_locked(url: str) -> dict:
         if cand in failed_verify:
             continue
         if _verify(cand):
-            return _ok(url, title=title, direct=cand, page=page_url)
+            return _ok(url, title=title, direct=cand, page=page_url, thumb=thumb)
     return {"ok": False, "error": last_err}

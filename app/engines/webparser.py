@@ -40,7 +40,7 @@ SITE_UA = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
-BACKEND_TIMEOUT = 12.0
+BACKEND_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 RACE_TIMEOUT = 14.5
 
 
@@ -155,6 +155,8 @@ def _pick_generic(data: Any) -> tuple[str | None, str | None, str | None]:
 
 
 def _ok(url: str, *, title: str | None, direct: str, key: str) -> dict:
+    if is_douyin(url) and direct:
+        direct = direct.replace("playwm", "play").replace("play_wm", "play")
     ext = "m3u8" if ".m3u8" in direct.lower() else "mp4"
     return {
         "ok": True,
@@ -313,7 +315,8 @@ class WebParserEngine:
         backends.append(("tenapi", _try_tenapi))
 
         errors: list[str] = []
-        with ThreadPoolExecutor(max_workers=len(backends)) as pool:
+        pool = ThreadPoolExecutor(max_workers=len(backends))
+        try:
             futs = {pool.submit(fn, url): name for name, fn in backends}
             try:
                 for fut in as_completed(futs, timeout=RACE_TIMEOUT):
@@ -331,5 +334,7 @@ class WebParserEngine:
                     errors.append((result or {}).get("error") or f"{name}: 失败")
             except TimeoutError:
                 errors.append("webparser: 公共解析超时")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         detail = "；".join(errors[:6]) if errors else "所有公共解析均失败"
         return {"ok": False, "error": detail[:400]}

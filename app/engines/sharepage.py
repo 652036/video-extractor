@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 from urllib.parse import unquote
 
 import httpx
 
-from ..config import MOBILE_UA, UA
+from ..config import MOBILE_UA, SHARE_TIMEOUT, UA
 from ..cookies import current, httpx_cookie_dict
 from ..urls import aweme_id_of, expand_share_url, is_douyin, is_kuaishou, photo_id_of
-from ..util import platform_of
 
 ROUTER_RE = re.compile(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", re.S | re.I)
 RENDER_RE = re.compile(
@@ -66,6 +66,9 @@ DOUYIN_HEADER_SETS = (
 )
 
 KUAISHOU_HEADER_SETS = (
+    {
+        "User-Agent": MOBILE_UA,
+    },
     {
         "User-Agent": IPHONE_UA,
         "Accept": "text/html,application/xhtml+xml",
@@ -168,14 +171,18 @@ class _Resp:
         self.status_code = status_code
 
 
-def _fetch(url: str, headers: dict, timeout: float = 8.0):
+def _fetch(url: str, headers: dict, timeout: float = 8.0, client: httpx.Client | None = None):
     extras = {"Accept-Encoding": "gzip, deflate"}
     merged = {**extras, **headers}
     cookies = httpx_cookie_dict(current()) or None
     last_err = None
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout, headers=merged, cookies=cookies) as client:
-            resp = client.get(url)
+        if client is not None:
+            resp = client.get(url, headers=merged, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers=merged, cookies=cookies) as c:
+            resp = c.get(url)
             resp.raise_for_status()
             return resp
     except Exception as exc:
@@ -189,6 +196,7 @@ def _fetch(url: str, headers: dict, timeout: float = 8.0):
             timeout=timeout,
             allow_redirects=True,
             headers=merged,
+            cookies=cookies,
         )
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}")
@@ -220,6 +228,7 @@ class SharePageEngine:
 
 def _extract_douyin(url: str) -> dict:
     errors: list[str] = []
+    deadline = time.monotonic() + SHARE_TIMEOUT
     aid = aweme_id_of(url)
     pages: list[str] = []
 
@@ -227,38 +236,45 @@ def _extract_douyin(url: str) -> dict:
         if u and u not in pages:
             pages.append(u)
 
-    add(url)
-    if not aid:
-        try:
-            resp = _fetch(url, DOUYIN_HEADER_SETS[0], timeout=8.0)
-            aid = aweme_id_of(str(resp.url)) or aweme_id_of(resp.text[:8000])
-            add(str(resp.url))
-            parsed = _parse_douyin_html(str(resp.url), resp.text)
-            if parsed:
-                return parsed
-        except Exception as exc:
-            errors.append(f"短链展开失败: {str(exc)[:120]}")
-    if aid:
-        add(f"https://www.iesdouyin.com/share/video/{aid}")
-        add(f"https://www.iesdouyin.com/share/video/{aid}/")
-        add(f"https://www.iesdouyin.com/share/note/{aid}")
-        add(f"https://m.douyin.com/share/video/{aid}")
-        add(f"https://www.douyin.com/video/{aid}")
-        add(f"https://www.douyin.com/discover?modal_id={aid}")
-
-    for page in pages:
-        if not is_douyin(page) and "iesdouyin.com" not in page:
-            continue
-        for headers in DOUYIN_HEADER_SETS:
+    cookies = httpx_cookie_dict(current()) or None
+    with httpx.Client(follow_redirects=True, cookies=cookies) as client:
+        if not aid:
             try:
-                resp = _fetch(page, headers, timeout=8.0)
+                remain = max(2.0, min(6.0, deadline - time.monotonic()))
+                resp = _fetch(url, DOUYIN_HEADER_SETS[0], timeout=remain, client=client)
+                aid = aweme_id_of(str(resp.url)) or aweme_id_of(resp.text[:8000])
+                add(str(resp.url))
+                parsed = _parse_douyin_html(str(resp.url), resp.text)
+                if parsed:
+                    return parsed
             except Exception as exc:
-                errors.append(f"{page}: {str(exc)[:100]}")
-                continue
-            parsed = _parse_douyin_html(str(resp.url), resp.text)
-            if parsed:
-                return parsed
-            errors.append(f"{page}: HTML 无 play_addr")
+                errors.append(f"短链展开失败: {str(exc)[:120]}")
+        if aid:
+            add(f"https://www.iesdouyin.com/share/video/{aid}/")
+            add(f"https://m.douyin.com/share/video/{aid}")
+            add(f"https://www.iesdouyin.com/share/note/{aid}")
+            add(f"https://www.douyin.com/video/{aid}")
+        else:
+            add(url)
+
+        for headers in DOUYIN_HEADER_SETS:
+            for page in pages:
+                remain = deadline - time.monotonic()
+                if remain <= 0.5:
+                    break
+                if not is_douyin(page) and "iesdouyin.com" not in page:
+                    continue
+                try:
+                    resp = _fetch(page, headers, timeout=min(5.0, remain), client=client)
+                except Exception as exc:
+                    errors.append(f"{page}: {str(exc)[:100]}")
+                    continue
+                parsed = _parse_douyin_html(str(resp.url), resp.text)
+                if parsed:
+                    return parsed
+                errors.append(f"{page}: HTML 无 play_addr")
+            if time.monotonic() >= deadline - 0.5:
+                break
     err = "；".join(dict.fromkeys(errors))[:240] or "iesdouyin 分享页未嵌入视频 JSON"
     return {"ok": False, "error": err}
 
@@ -330,44 +346,82 @@ def _parse_douyin_html(page: str, text: str) -> dict | None:
 
 def _extract_kuaishou(url: str) -> dict:
     errors: list[str] = []
-    expanded = expand_share_url(url)
+    deadline = time.monotonic() + SHARE_TIMEOUT
+    pid = photo_id_of(url)
+    expanded = url
+    if not pid:
+        expanded = expand_share_url(url)
+        pid = photo_id_of(expanded) or photo_id_of(url)
+
     pages: list[str] = []
 
     def add(u: str | None) -> None:
         if u and u not in pages:
             pages.append(u)
 
-    add(url)
-    add(expanded)
-    pid = photo_id_of(expanded) or photo_id_of(url)
-    if not pid:
-        try:
-            resp = _fetch(url, KUAISHOU_HEADER_SETS[0], timeout=8.0)
-            pid = photo_id_of(str(resp.url))
-            add(str(resp.url))
-            parsed = _parse_kuaishou_html(str(resp.url), resp.text)
-            if parsed:
-                return parsed
-        except Exception as exc:
-            errors.append(f"短链展开失败: {str(exc)[:120]}")
-    if pid:
-        add(f"https://m.gifshow.com/fw/photo/{pid}")
-        add(f"https://v.m.chenzhongtech.com/fw/photo/{pid}")
-        add(f"https://www.kuaishou.com/short-video/{pid}")
-
-    for page in pages:
-        for headers in KUAISHOU_HEADER_SETS:
+    cookies = httpx_cookie_dict(current()) or None
+    with httpx.Client(follow_redirects=True, cookies=cookies) as client:
+        if not pid and time.monotonic() < deadline - 1.0:
             try:
-                resp = _fetch(page, headers, timeout=8.0)
+                resp = _fetch(url, KUAISHOU_HEADER_SETS[0], timeout=min(6.0, deadline - time.monotonic()), client=client)
+                pid = photo_id_of(str(resp.url))
+                parsed = _parse_kuaishou_html(str(resp.url), resp.text)
+                if parsed:
+                    return parsed
+                add(str(resp.url))
             except Exception as exc:
-                errors.append(f"{page}: {str(exc)[:120]}")
-                continue
-            parsed = _parse_kuaishou_html(str(resp.url), resp.text)
-            if parsed:
-                return parsed
-            errors.append(f"{page}: 无 CDN 地址")
+                errors.append(f"短链展开失败: {str(exc)[:120]}")
+        if pid:
+            # Prefer mobile share endpoints first: they embed INIT_STATE with playable mainMvUrls MP4.
+            add(f"https://v.m.chenzhongtech.com/fw/photo/{pid}")
+            add(f"https://m.gifshow.com/fw/photo/{pid}")
+            add(f"https://www.kuaishou.com/short-video/{pid}")
+        add(expanded)
+        add(url)
+
+        for headers in KUAISHOU_HEADER_SETS:
+            for page in pages:
+                remain = deadline - time.monotonic()
+                if remain <= 0.5:
+                    break
+                try:
+                    resp = _fetch(page, headers, timeout=min(6.0, remain), client=client)
+                except Exception as exc:
+                    errors.append(f"{page}: {str(exc)[:120]}")
+                    continue
+                parsed = _parse_kuaishou_html(str(resp.url), resp.text)
+                if parsed:
+                    return parsed
+                errors.append(f"{page}: 无 CDN 地址")
+            if time.monotonic() >= deadline - 0.5:
+                break
     err = "；".join(dict.fromkeys(errors))[:240] or "快手分享页未找到播放地址"
     return {"ok": False, "error": err}
+
+
+def _url_from_adaptation_sets(sets: Any) -> str | None:
+    if not isinstance(sets, list):
+        return None
+    best_url = None
+    best_bitrate = -1
+    for aset in sets:
+        if not isinstance(aset, dict):
+            continue
+        for rep in aset.get("representation") or []:
+            if not isinstance(rep, dict):
+                continue
+            u = rep.get("url")
+            if not isinstance(u, str) or not u.startswith("http"):
+                continue
+            bitrate = rep.get("maxBitrate") or rep.get("avgBitrate") or 0
+            try:
+                bitrate = int(bitrate)
+            except Exception:
+                bitrate = 0
+            if bitrate >= best_bitrate:
+                best_url = u
+                best_bitrate = bitrate
+    return best_url
 
 
 def _parse_kuaishou_html(page: str, text: str) -> dict | None:
@@ -388,6 +442,7 @@ def _parse_kuaishou_html(page: str, text: str) -> dict | None:
             lambda o: isinstance(o, dict)
             and (
                 o.get("__typename") == "VisionVideoDetailPhoto"
+                or o.get("mainMvUrls")
                 or o.get("photoUrl")
                 or o.get("photoH265Url")
             ),
@@ -399,20 +454,26 @@ def _parse_kuaishou_html(page: str, text: str) -> dict | None:
     direct = None
     if isinstance(photo, dict):
         title = photo.get("caption") or photo.get("title") or title
-        cover = photo.get("coverUrl") or photo.get("poster")
-        direct = photo.get("photoUrl") or photo.get("photoH265Url")
+        cover = (
+            photo.get("coverUrl")
+            or photo.get("poster")
+            or _first_http(photo.get("coverUrls") or photo.get("webpCoverUrls"))
+        )
+        direct = (
+            _first_http(photo.get("mainMvUrls"))
+            or photo.get("photoUrl")
+            or photo.get("photoH265Url")
+        )
+        if not direct:
+            manifest = photo.get("manifest") or {}
+            if isinstance(manifest, dict):
+                direct = _url_from_adaptation_sets(manifest.get("adaptationSet"))
         if not direct:
             vr = photo.get("videoResource") or {}
             j = (vr.get("json") if isinstance(vr, dict) else None) or {}
-            for codec in ("hevc", "h264"):
-                sets = ((j.get(codec) or {}).get("adaptationSet") or []) if isinstance(j, dict) else []
-                for aset in sets:
-                    for rep in aset.get("representation") or []:
-                        if isinstance(rep, dict) and rep.get("url"):
-                            direct = rep["url"]
-                            break
-                    if direct:
-                        break
+            for codec in ("h264", "hevc"):
+                if isinstance(j, dict):
+                    direct = _url_from_adaptation_sets((j.get(codec) or {}).get("adaptationSet"))
                 if direct:
                     break
 
@@ -442,10 +503,12 @@ def _media_urls(text: str) -> list[str]:
         url = raw.replace("&amp;", "&")
         if url not in found and "http" in url:
             found.append(url)
-    # prefer typical kuaishou CDN hosts
-    pref = [u for u in found if any(h in u for h in ("kwaicdn", "yximgs", "kwimgs", "gifshow", "oskwai"))]
-    return pref or found
+    # Prefer direct playable CDN MP4s over encrypted/remux HLS placeholders (which often 403).
+    def _score(u: str) -> tuple[int, int, int]:
+        low = u.lower()
+        is_enc_remux = 1 if ("realtime_remux" in low or "/enc_" in low) else 0
+        is_m3u8 = 1 if ".m3u8" in low else 0
+        is_ks = 0 if any(h in low for h in ("kwimgs", "yximgs", "kwaicdn", "gifshow", "oskwai")) else 1
+        return (is_enc_remux, is_ks, is_m3u8)
 
-
-# silence unused import if platform_of stays unused
-_ = platform_of
+    return sorted(found, key=_score)

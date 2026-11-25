@@ -193,7 +193,7 @@ class LuxEngine:
     stage = 30
 
     def available(self) -> bool:
-        return ensure_lux()
+        return _lux_ready(LUX_BIN)
 
     def version(self) -> str:
         if not LUX_BIN.is_file():

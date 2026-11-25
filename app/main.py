@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import shutil
 from urllib.parse import quote
 
@@ -24,13 +27,22 @@ from .cookies import (
 from .download import materialize
 from .extract import engines_status, extract_media, normalize_input
 from .jobs import STORE
-from .preview import router as preview_router
+from .preview import close_client as close_preview_client, router as preview_router
 from .util import hostname_of, sanitize_filename
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("unwatermark")
 
-app = FastAPI(title="视频无水印解析", version="1.1.0", docs_url="/api/docs")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        await close_preview_client()
+
+
+app = FastAPI(title="视频无水印解析", version="1.2.0", docs_url="/api/docs", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,6 +56,15 @@ class ParseBody(BaseModel):
     url: str = Field(..., min_length=1, max_length=8000)
     cookies_from_browser: str | None = Field(default=None, max_length=80)
     cookies_path: str | None = Field(default=None, max_length=512)
+
+
+def _unlink_quiet(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _empty_fail(error: str, *, needs_cookie: bool = False, hint: str | None = None, platform=None):
@@ -84,13 +105,15 @@ def _merge_cookie_opts(
     return CookieOpts(cookiefile=path, cookies_from_browser=browser)
 
 
-async def _parse_core(url_text: str, opts: CookieOpts):
+async def _parse_core(url_text: str, opts: CookieOpts, uploaded_path: str | None = None):
     url, err = normalize_input(url_text)
     if err:
+        _unlink_quiet(uploaded_path)
         return _empty_fail(err)
     with cookie_scope(opts):
         result = await extract_media(url)
     if not result.get("ok"):
+        _unlink_quiet(uploaded_path)
         return _empty_fail(
             result.get("error") or "解析失败",
             needs_cookie=bool(result.get("needs_cookie")),
@@ -98,7 +121,7 @@ async def _parse_core(url_text: str, opts: CookieOpts):
             platform=result.get("platform"),
         )
     job = STORE.create(
-        page_url=url,
+        page_url=result.get("page_url") or url,
         title=result.get("title") or "video",
         ext=result.get("ext") or "mp4",
         filesize=result.get("filesize"),
@@ -110,6 +133,9 @@ async def _parse_core(url_text: str, opts: CookieOpts):
         extra={
             "cookiefile": opts.cookiefile,
             "cookies_from_browser": opts.cookies_from_browser,
+            "uploaded_cookiefile": uploaded_path,
+            "preview_direct_url": result.get("preview_direct_url"),
+            "http_headers": result.get("http_headers") or {},
         },
     )
     return {
@@ -150,13 +176,13 @@ async def engines():
 @app.post("/api/parse")
 async def parse(request: Request):
     ctype = (request.headers.get("content-type") or "").lower()
+    uploaded_path: str | None = None
     try:
         if "multipart/form-data" in ctype:
             form = await request.form()
             url_text = str(form.get("url") or "")
             browser = str(form.get("cookies_from_browser") or "") or None
             path = str(form.get("cookies_path") or "") or None
-            uploaded_path = None
             upload = form.get("cookies_file")
             if upload is not None and hasattr(upload, "read"):
                 data = await upload.read()
@@ -165,7 +191,7 @@ async def parse(request: Request):
             opts = _merge_cookie_opts(
                 cookies_from_browser=browser, cookies_path=path, uploaded=uploaded_path
             )
-            return await _parse_core(url_text, opts)
+            return await _parse_core(url_text, opts, uploaded_path=uploaded_path)
         body = ParseBody.model_validate(await request.json())
         opts = _merge_cookie_opts(
             cookies_from_browser=body.cookies_from_browser,
@@ -174,6 +200,7 @@ async def parse(request: Request):
         )
         return await _parse_core(body.url, opts)
     except ValueError as exc:
+        _unlink_quiet(uploaded_path)
         return _empty_fail(str(exc))
 
 
@@ -191,7 +218,7 @@ async def download(job: str = Query(..., min_length=8, max_length=64)):
         opts = current()
     try:
         with cookie_scope(opts):
-            path = materialize(item)
+            path = await asyncio.to_thread(materialize, item)
     except Exception as exc:
         raise HTTPException(502, f"下载失败：{exc}") from exc
     filename = sanitize_filename(item.title) + "." + (path.suffix.lstrip(".") or item.ext or "mp4")

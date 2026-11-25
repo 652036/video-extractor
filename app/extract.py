@@ -137,10 +137,7 @@ async def extract_media(url: str) -> dict:
     if not engines:
         return {"ok": False, "error": "没有可用的解析引擎"}
 
-    cn = is_cn_short_video(url)
-    overall = CN_OVERALL_TIMEOUT if cn else OVERALL_TIMEOUT
     host = hostname_of(url)
-    deadline = time.monotonic() + overall
     errors: list[str] = []
     needs_cookie = False
 
@@ -151,20 +148,31 @@ async def extract_media(url: str) -> dict:
         errors.append(f"短链展开: {str(exc)[:80]}")
         resolved = url
 
+    blocked = is_blocked(resolved)
+    if blocked:
+        return {"ok": False, "error": f"不支持会员/DRM 平台：{blocked}"}
+
+    cn = is_cn_short_video(url) or is_cn_short_video(resolved)
+    douyin = is_douyin(url) or is_douyin(resolved)
+    overall = CN_OVERALL_TIMEOUT if cn else OVERALL_TIMEOUT
+    deadline = time.monotonic() + overall
+
     race_url = ytdlp_url(url, resolved)
+
+    def matches_any(engine) -> bool:
+        return _matches(engine, url) or (resolved != url and _matches(engine, resolved))
 
     named_fallback = {"webparser", "lux"}
     named_share = {"share-page"}
     named_browser = {"douyin-browser"}
-    share = [e for e in engines if e.name in named_share or _stage_of(e) <= SHARE_STAGE]
-    share = [e for e in share if _matches(e, url)]
+    share = [e for e in engines if (e.name in named_share or _stage_of(e) <= SHARE_STAGE) and matches_any(e)]
     browser = [
         e
         for e in engines
-        if (e.name in named_browser or _stage_of(e) == BROWSER_STAGE) and _matches(e, url)
+        if (e.name in named_browser or _stage_of(e) == BROWSER_STAGE) and matches_any(e)
     ]
-    core = [e for e in engines if e.name not in named_fallback | named_share | named_browser]
-    fallback = [e for e in engines if e.name in named_fallback and _matches(e, url)]
+    core = [e for e in engines if e.name not in named_fallback | named_share | named_browser and matches_any(e)]
+    fallback = [e for e in engines if e.name in named_fallback and matches_any(e)]
 
     # Douyin/Kuaishou: race share-page + public parsers + Chrome guest fetch
     # in the FIRST stage so yt-dlp's needs_cookie cannot eat the budget.
@@ -179,16 +187,17 @@ async def extract_media(url: str) -> dict:
 
     stages: list[tuple[list, str, float, str]] = []
     first_budget = max(SHARE_TIMEOUT, WEBPARSER_MIN_S + 1.0)
-    if browser and first and any(getattr(e, "name", "") == "douyin-browser" for e in first):
+    if browser and first and _has_engine(first, "douyin-browser"):
         first_budget = max(first_budget, BROWSER_MIN_S)
     if cn and first:
         stages.append((first, resolved, first_budget, "first"))
     # Dedicated browser heat if it was not already in first (non-CN / no share).
-    if browser and not (cn and first and any(getattr(e, "name", "") == "douyin-browser" for e in first)):
+    if browser and not (cn and first and _has_engine(first, "douyin-browser")):
         stages.append((browser, resolved, BROWSER_MIN_S, "browser"))
-    stages.append((core, race_url, ENGINE_TIMEOUT, "core"))
-    # Always still run fallback after needs_cookie — prefer a later webparser hit.
-    if cn and fallback:
+    if core:
+        stages.append((core, race_url, ENGINE_TIMEOUT, "core"))
+    # Only schedule a separate post-core fallback stage if fallback did not already run in first.
+    if cn and fallback and not any(e in first for e in fallback):
         stages.append((fallback, resolved, WEBPARSER_MIN_S + 1.0, "fallback"))
 
     webparser_budget = 0.0
@@ -228,23 +237,21 @@ async def extract_media(url: str) -> dict:
             return winner
 
     # Douyin: never return needs_cookie until douyin-browser has finished or timed out.
-    if is_douyin(url) and browser and browser_budget < BROWSER_MIN_S:
+    if douyin and browser and browser_budget < BROWSER_MIN_S:
         br = next((e for e in browser if getattr(e, "name", "") == "douyin-browser"), None)
         if br:
-            extra_deadline = time.monotonic() + BROWSER_MIN_S + 1.0
-            deadline = extra_deadline
+            deadline = time.monotonic() + BROWSER_MIN_S + 1.0
             log.info("parse host=%s last-chance douyin-browser 25s", host)
             winner = await run_group([br], resolved, BROWSER_MIN_S + 1.0)
             if winner:
                 log.info("parse host=%s engine=%s stage=last-chance-browser ok", host, winner.get("extractor"))
                 return winner
 
-    # Do not return needs_cookie unless webparser was given a full 15s.
+    # Do not return needs_cookie for CN platforms unless webparser was given a full 15s.
     if cn and webparser_budget < WEBPARSER_MIN_S:
         wp = next((e for e in fallback if getattr(e, "name", "") == "webparser"), None)
         if wp:
-            extra_deadline = time.monotonic() + WEBPARSER_MIN_S + 1.0
-            deadline = extra_deadline
+            deadline = time.monotonic() + WEBPARSER_MIN_S + 1.0
             log.info("parse host=%s last-chance webparser 15s", host)
             winner = await run_group([wp], resolved, WEBPARSER_MIN_S + 1.0)
             webparser_budget = max(webparser_budget, WEBPARSER_MIN_S)
@@ -252,31 +259,34 @@ async def extract_media(url: str) -> dict:
                 log.info("parse host=%s engine=%s stage=last-chance ok", host, winner.get("extractor"))
                 return winner
 
-    if needs_cookie and webparser_budget >= WEBPARSER_MIN_S:
-        if is_douyin(url) and browser and browser_budget < BROWSER_MIN_S:
-            log.info(
-                "parse host=%s skip needs_cookie; douyin-browser budget=%.1fs",
-                host,
-                browser_budget,
-            )
-        else:
-            log.info(
-                "parse host=%s needs_cookie after webparser_budget=%.1fs browser_budget=%.1fs",
-                host,
-                webparser_budget,
-                browser_budget,
-            )
-            detail = "；".join(errors[:8]) if errors else "needs cookie"
-            return {
-                "ok": False,
-                "error": detail[:400],
-                "needs_cookie": True,
-                "hint": (
-                    "分享页/公共解析仍失败。可选最后手段：本机 Netscape cookies.txt "
-                    "或 UNWATERMARK_COOKIES / UNWATERMARK_COOKIES_FROM_BROWSER。"
-                    "不要把 Cookie 发给任何人。"
-                ),
-            }
+    has_wp_engine = _has_engine(fallback, "webparser")
+    wp_ready = (not cn) or (not has_wp_engine) or (webparser_budget >= WEBPARSER_MIN_S)
+    br_ready = (not douyin) or (not browser) or (browser_budget >= BROWSER_MIN_S)
+
+    if needs_cookie and wp_ready and br_ready:
+        log.info(
+            "parse host=%s needs_cookie cn=%s webparser_budget=%.1fs browser_budget=%.1fs",
+            host,
+            cn,
+            webparser_budget,
+            browser_budget,
+        )
+        detail = "；".join(errors[:8]) if errors else "needs cookie"
+        hint = (
+            "分享页/公共解析仍失败。可选最后手段：本机 Netscape cookies.txt "
+            "或 UNWATERMARK_COOKIES / UNWATERMARK_COOKIES_FROM_BROWSER。"
+            "不要把 Cookie 发给任何人。"
+            if cn
+            else "目标平台限制了游客访问。可展开「本机 Cookies」上传 Netscape cookies.txt "
+            "或使用 UNWATERMARK_COOKIES / UNWATERMARK_COOKIES_FROM_BROWSER。"
+            "不要把 Cookie 发给任何人。"
+        )
+        return {
+            "ok": False,
+            "error": detail[:400],
+            "needs_cookie": True,
+            "hint": hint,
+        }
 
     log.info("parse host=%s fail webparser_budget=%.1fs", host, webparser_budget)
     detail = "；".join(errors[:8]) if errors else "所有引擎均未能解析"
