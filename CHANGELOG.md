@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) where tagged.
 
+## [1.2.0]
+
+### Added
+
+- Android multi-threaded HTTP Range parallel downloader (3–6 concurrent threads via `FileChannel` + 256 KB buffered `MediaStore` writes) with live download speed (`MB/s`) display.
+- Android Foreground Service (`DownloadService`, `dataSync`) for background/screen-off downloads with live notification progress bar, Cancel action, and tap-to-play completion notification.
+- On-demand ExoPlayer preview (shows cover thumbnail first and releases player before download to avoid CDN bandwidth/connection contention).
+
+### Fixed
+
+- Instant socket cancellation (`Call.cancel()`) and guaranteed cleanup of partial `.tmp` cache files and incomplete `MediaStore` entries when cancelling or clearing an active download.
+
 ## [1.1.0]
 
 ### Added

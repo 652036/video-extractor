@@ -33,7 +33,14 @@ sealed interface ExtractResult {
 
 sealed interface DownloadState {
     data object Idle : DownloadState
-    data class Downloading(val progress: Float, val bytesRead: Long, val totalBytes: Long) : DownloadState
+    data class Downloading(
+        val progress: Float,
+        val bytesRead: Long,
+        val totalBytes: Long,
+        val speedBytesPerSec: Long = 0L,
+        val threads: Int = 1,
+        val stage: String = "下载中",
+    ) : DownloadState
     data class Saved(val displayName: String, val uriString: String) : DownloadState
     data class Failed(val error: String) : DownloadState
 }
