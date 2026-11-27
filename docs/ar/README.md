@@ -27,7 +27,7 @@
 
 - واجهة ويب على `http://127.0.0.1:8787` — لصق النص/الرابط، معاينة، تنزيل
 - سباق متعدد المحركات: أول نجاح يفوز؛ تُلغى البقية
-- المحركات: `share-page`، `douyin-browser` (Chrome بلا واجهة)، `yt-dlp`، `videofetch`، `you-get`، `webparser`، `lux`
+- المحركات: `share-page`، `douyin-browser` (Chrome بلا واجهة)، `xianyu`، `yt-dlp`، `videofetch`، `you-get`، `webparser`، `lux`
 - يستخرج أول رابط `http(s)` من شعارات المشاركة
 - ملفات Netscape cookies محلية اختيارية / `--cookies-from-browser` كـ**حل أخير** (لا تُجلب نيابة عنك)
 - قائمة حظر صريحة لـ VIP / DRM؛ رفض التقاط تسجيل الدخول/MITM لـ WeChat Channels
@@ -89,6 +89,7 @@ winget install --id Gyan.FFmpeg -e
 |---|---|---|
 | **share-page** | Douyin, Kuaishou | Guest share-page HTML (`_ROUTER_DATA` / `__APOLLO_STATE__`); no login cookie |
 | **douyin-browser** | Douyin | Headless Chrome; captures CDN `video_mp4` from `iesdouyin.com/share/video/{id}/` |
+| **xianyu** | Xianyu (`goofish.com` / `2.taobao.com` / `m.tb.cn`) | Direct MTOP API (H5 guest first; PC + UD/HD query when cookies supplied) + headless Chrome passive capture |
 | **yt-dlp** | YouTube, Bilibili, TikTok, Instagram, X, Facebook, Reddit, Weibo, Vimeo, … | Follow [yt-dlp supported sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) |
 | **videofetch** | Douyin, Kuaishou, Xiaohongshu, Bilibili, … | Public-UGC clients only; VIP movie clients disabled |
 | **you-get** | Some CN / social sites | Extra fallback parser |
@@ -101,6 +102,7 @@ winget install --id Gyan.FFmpeg -e
 
 - **Douyin**: datacenter IPs often lack `play_addr` on share pages; yt-dlp may report `needs cookie`. Public hybrid parsers or `douyin-browser` may still succeed. Cookies are never stolen.
 - **Kuaishou**: yt-dlp has no Kuaishou extractor. Existing `www.kuaishou.com/short-video/{id}` pages may parse via webparser; `v.kuaishou.com` shorts often expire; TLS EOF from some hosts is common.
+- **Xianyu**: without cookies, the `xianyu` engine prioritizes the mobile H5 share API (`mtop.taobao.idle.awesome.detail`) and H5 page, which work anonymously on residential IPs. Datacenter/cloud IPs often hit Alibaba risk control (`cloud_ip_bl` / `RGV587_ERROR`), and PC UD/HD quality (`mtop.idle.cloud.video.query`) requires local `--cookies-from-browser` or Netscape `cookies.txt`.
 - **Vimeo**: anonymous macos OAuth currently returns 401; use local `--cookies-from-browser` if you are logged in.
 - **YouTube**: some IPs hit a bot wall (`Sign in to confirm you’re not a bot`); same optional local cookies apply.
 

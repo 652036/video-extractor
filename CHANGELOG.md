@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Offline URL regression tests, executed by CI without real video requests or cookies.
+- Xianyu (闲鱼 / `goofish.com` / `2.taobao.com` / `m.tb.cn`) video extraction engine (`app/engines/xianyu.py`) supporting `m.tb.cn` JS redirect expansion, H5 guest MTOP API (`mtop.taobao.idle.awesome.detail`), PC MTOP + UD/HD video query (`mtop.idle.cloud.video.query`) with scoped local cookies, and headless Chrome passive capture fallback.
+- Scoped cookie helper (`cookies_for_domains`) supporting Netscape `cookies.txt` and `--cookies-from-browser`.
+- Offline unit and endpoint tests (`tests/test_core.py`, `tests/test_url_integrity.py`, `tests/test_xianyu.py`), executed by CI without real video requests or cookies.
 
 ## [1.2.0] - 2026-08-22
 

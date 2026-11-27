@@ -6,7 +6,7 @@
 
 1. **UI / API** — `static/` is served at `/`. `POST /api/parse` accepts JSON or multipart (optional Netscape cookies).
 2. **Normalize** — `app/extract.py` / `app/urls.py` pull the first `http(s)` URL from share slogans, expand short links, and refuse VIP/DRM hosts (`app/config.py` `BLOCKED_HOSTS`) plus WeChat Channels MITM-style targets.
-3. **Staged race** — Available engines from `app/engines/` run in stages. For Douyin/Kuaishou, `share-page`, `webparser`, `lux`, and `douyin-browser` race early so a yt-dlp `needs cookie` cannot consume the whole budget. Core engines (`yt-dlp`, `videofetch`, `you-get`) run next; fallbacks may run again. First `ok` wins; others are cancelled.
+3. **Staged race** — Available engines from `app/engines/` run in stages. For Douyin/Kuaishou, `share-page`, `webparser`, `lux`, and `douyin-browser` race early so a yt-dlp `needs cookie` cannot consume the whole budget. For Xianyu (`goofish.com` / `2.taobao.com` / `m.tb.cn`), the dedicated `xianyu` engine runs directly (H5 guest MTOP API + headless Chrome passive capture, upgrading to PC UD/HD when cookies are supplied) and skips `yt-dlp`. Core engines (`yt-dlp`, `videofetch`, `you-get`) run next for other sites; fallbacks may run again. First `ok` wins; others are cancelled.
 4. **Job** — Success creates a short-lived job in `app/jobs.py` with metadata and optional `direct_url`.
 5. **Materialize** — `GET /api/download` / `/api/preview` call `app/download.py` (yt-dlp + ffmpeg merge when needed). Cookies stay scoped via `app/cookies.py` and are never fetched from websites for you.
 
@@ -16,6 +16,7 @@
 |---|---|
 | `share-page` | Guest HTML parse for Douyin/Kuaishou share pages |
 | `douyin-browser` | Headless Chrome network capture on `iesdouyin.com/share/video/{id}/` |
+| `xianyu` | Direct MTOP API (H5 guest / PC UD-HD) + headless Chrome passive capture for Xianyu (`goofish.com` / `m.tb.cn`) |
 | `yt-dlp` | Broad site coverage |
 | `videofetch` | Extra CN short-video clients (public UGC allow-list only) |
 | `you-get` | Additional fallback |

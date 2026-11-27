@@ -25,7 +25,7 @@ Paste a public video share text or URL. The server races several extractors in p
 
 - Web UI at `http://127.0.0.1:8787` — paste share text or a URL, preview, download
 - Multi-engine race: first successful extractor wins; others are cancelled
-- Engines: `share-page`, `douyin-browser` (headless Chrome), `yt-dlp`, `videofetch`, `you-get`, `webparser`, `lux`
+- Engines: `share-page`, `douyin-browser` (headless Chrome), `xianyu`, `yt-dlp`, `videofetch`, `you-get`, `webparser`, `lux`
 - Extracts the first `http(s)` URL from clipboard-style share slogans
 - Supports local Netscape cookie files or `--cookies-from-browser` for authentication
 - Explicit block list for VIP / DRM hosts; WeChat Channels login/MITM capture refused
@@ -99,6 +99,7 @@ Timeouts: ~25s per engine, ~30s overall; Douyin/Kuaishou first race share-page +
 |---|---|---|
 | **share-page** | Douyin, Kuaishou | Guest share-page HTML (`_ROUTER_DATA` / `__APOLLO_STATE__`); no login cookie |
 | **douyin-browser** | Douyin | Headless Chrome; captures CDN `video_mp4` from `iesdouyin.com/share/video/{id}/` |
+| **xianyu** | Xianyu (`goofish.com` / `2.taobao.com` / `m.tb.cn`) | Direct MTOP API (H5 guest first; PC + UD/HD query when cookies supplied) + headless Chrome passive capture |
 | **yt-dlp** | YouTube, Bilibili, TikTok, Instagram, X, Facebook, Reddit, Weibo, Vimeo, … | Follow [yt-dlp supported sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) |
 | **videofetch** | Douyin, Kuaishou, Xiaohongshu, Bilibili, … | Public-UGC clients only; VIP movie clients disabled |
 | **you-get** | Some CN / social sites | Extra fallback parser |
@@ -111,6 +112,7 @@ Platform APIs change often; parse failures are normal. Login-walled content may 
 
 - **Douyin**: datacenter IPs often lack `play_addr` on share pages; yt-dlp may report `needs cookie`. Public hybrid parsers or `douyin-browser` may still succeed.
 - **Kuaishou**: yt-dlp has no Kuaishou extractor. Existing `www.kuaishou.com/short-video/{id}` pages may parse via webparser; `v.kuaishou.com` shorts often expire; TLS EOF from some hosts is common.
+- **Xianyu**: without cookies, the `xianyu` engine prioritizes the mobile H5 share API (`mtop.taobao.idle.awesome.detail`) and H5 page, which work anonymously on residential IPs. Datacenter/cloud IPs often hit Alibaba risk control (`cloud_ip_bl` / `RGV587_ERROR`), and PC UD/HD quality (`mtop.idle.cloud.video.query`) requires local `--cookies-from-browser` or Netscape `cookies.txt`.
 - **Vimeo**: anonymous macOS OAuth currently returns 401; use local `--cookies-from-browser` if you are logged in.
 - **YouTube**: some IPs hit a bot wall (`Sign in to confirm you’re not a bot`); same optional local cookies apply.
 

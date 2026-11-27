@@ -25,7 +25,7 @@
 
 - Web 界面：`http://127.0.0.1:8787`，支持粘贴分享口令或链接进行预览与下载
 - 多引擎并行竞速：优先采用最先成功的解析结果，其余任务自动取消
-- 内置引擎：`share-page`、`douyin-browser`（无头 Chrome）、`yt-dlp`、`videofetch`、`you-get`、`webparser`、`lux`
+- 内置引擎：`share-page`、`douyin-browser`（无头 Chrome）、`xianyu`、`yt-dlp`、`videofetch`、`you-get`、`webparser`、`lux`
 - 自动从分享口令中提取首个 `http(s)` 链接
 - 支持通过本机 Netscape 格式 Cookie 文件或 `--cookies-from-browser` 提供身份验证信息
 - 明确拒绝 VIP / DRM 域名及微信视频号登录式采集
@@ -99,6 +99,7 @@ winget install --id Gyan.FFmpeg -e
 |---|---|---|
 | **share-page** | 抖音、快手 | 解析游客分享页 HTML（`_ROUTER_DATA` / `__APOLLO_STATE__`），无需登录 Cookie |
 | **douyin-browser** | 抖音 | 无头 Chrome，从 `iesdouyin.com/share/video/{id}/` 捕获 CDN `video_mp4` |
+| **xianyu** | 闲鱼（`goofish.com` / `2.taobao.com` / `m.tb.cn`） | 直连 MTOP 接口（无 Cookie 优先 H5 游客接口；有 Cookie 优先 PC 接口并拉取 UD/HD 原画）+ 无头 Chrome 被动捕获 |
 | **yt-dlp** | YouTube、B站、TikTok、Instagram、X、Facebook、Reddit、微博、Vimeo 等 | 以 [yt-dlp 官方支持列表](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) 为准 |
 | **videofetch** | 抖音、快手、小红书、B站等 | 仅启用公开 UGC 客户端；会员影音相关客户端已禁用 |
 | **you-get** | 部分国内 / 社交站点 | 额外兜底解析器 |
@@ -111,6 +112,7 @@ winget install --id Gyan.FFmpeg -e
 
 - **抖音**：机房 IP 访问分享页时可能缺少 `play_addr`；yt-dlp 可能提示需要 Cookie。公共 hybrid 接口或 `douyin-browser` 仍可能成功。
 - **快手**：yt-dlp 暂无快手提取器。`www.kuaishou.com/short-video/{id}` 页面可由 webparser 解析；`v.kuaishou.com` 短链可能过期；部分环境可能出现 TLS EOF。
+- **闲鱼**：无 Cookie 时优先走移动端 H5 分享接口（`mtop.taobao.idle.awesome.detail`）与 H5 页面，在家庭宽带等非机房 IP 下可免登录尝试提取；云服务器/机房 IP 常触发阿里风控（`cloud_ip_bl` / `RGV587_ERROR`），如需稳定解析或拉取 PC 端 UD/HD 高清视频（`mtop.idle.cloud.video.query`），请提供本机 `--cookies-from-browser` 或 Netscape `cookies.txt`。
 - **Vimeo**：匿名 macOS OAuth 当前返回 401；本机已登录时可使用 `--cookies-from-browser`。
 - **YouTube**：部分 IP 可能触发 bot wall；可使用本机 Cookie。
 
