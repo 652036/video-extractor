@@ -250,4 +250,25 @@ class ParsersTest {
         assertTrue(vimeoRes is ExtractResult.Success)
         assertEquals("https://vod.vimeocdn.com/1080.mp4", (vimeoRes as ExtractResult.Success).video.directUrl)
     }
+
+    @Test
+    fun downloaderRangeChunkingAndProbeParsing() {
+        assertEquals(1, com.videoextractor.app.download.MediaDownloader.chooseThreadCount(500_000L))
+        assertEquals(3, com.videoextractor.app.download.MediaDownloader.chooseThreadCount(2_000_000L))
+        assertEquals(4, com.videoextractor.app.download.MediaDownloader.chooseThreadCount(8_000_000L))
+        assertEquals(6, com.videoextractor.app.download.MediaDownloader.chooseThreadCount(30_000_000L))
+
+        val ranges = com.videoextractor.app.download.MediaDownloader.computeRanges(100L, 6)
+        assertEquals(6, ranges.size)
+        assertEquals(0L, ranges.first().first)
+        assertEquals(99L, ranges.last().last)
+        for (i in 1 until ranges.size) {
+            assertEquals(ranges[i - 1].last + 1, ranges[i].first)
+        }
+
+        assertEquals(
+            28083412L,
+            com.videoextractor.app.download.MediaDownloader.parseTotalFromContentRange("bytes 0-0/28083412"),
+        )
+    }
 }

@@ -5,6 +5,8 @@ import android.webkit.CookieManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.videoextractor.app.core.UrlUtils
+import com.videoextractor.app.download.DownloadBus
+import com.videoextractor.app.download.DownloadService
 import com.videoextractor.app.download.MediaDownloader
 import com.videoextractor.app.engine.SniffHelper
 import com.videoextractor.app.engine.VideoExtractorEngine
@@ -25,6 +27,7 @@ data class ExtractorUiState(
     val elapsedSeconds: Double? = null,
     val result: ExtractResult? = null,
     val downloadState: DownloadState = DownloadState.Idle,
+    val previewEnabled: Boolean = false,
     val interactiveBrowserUrl: String? = null,
     val snackbarMessage: String? = null,
 )
@@ -36,15 +39,44 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
     val state: StateFlow<ExtractorUiState> = _state.asStateFlow()
 
     private var parseJob: Job? = null
-    private var downloadJob: Job? = null
+
+    init {
+        // Sync live background download state from DownloadService so progress survives
+        // app switching, screen lock, and Activity recreation.
+        viewModelScope.launch {
+            DownloadBus.state.collect { dlState ->
+                _state.update { cur ->
+                    val restoredResult = if (cur.result == null && dlState !is DownloadState.Idle) {
+                        DownloadBus.activeVideo.value?.let { ExtractResult.Success(it) }
+                    } else {
+                        cur.result
+                    }
+                    cur.copy(
+                        result = restoredResult,
+                        downloadState = dlState,
+                    )
+                }
+            }
+        }
+    }
 
     fun onInputChanged(text: String) {
         _state.update { it.copy(inputText = text) }
     }
 
+    fun enablePreview() {
+        _state.update { it.copy(previewEnabled = true) }
+    }
+
     fun clearInput() {
         parseJob?.cancel()
-        downloadJob?.cancel()
+        val wasDownloading = _state.value.downloadState is DownloadState.Downloading
+        if (wasDownloading) {
+            DownloadService.cancel(getApplication<Application>().applicationContext)
+        } else {
+            DownloadBus.resetIfNotDownloading()
+            MediaDownloader.cleanupStaleTempFiles(getApplication<Application>().applicationContext)
+        }
         _state.update {
             it.copy(
                 inputText = "",
@@ -52,7 +84,9 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
                 stageMessage = "",
                 elapsedSeconds = null,
                 result = null,
+                previewEnabled = false,
                 downloadState = DownloadState.Idle,
+                snackbarMessage = if (wasDownloading) "已取消未完成的下载并清理临时文件" else it.snackbarMessage,
             )
         }
     }
@@ -72,7 +106,9 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         parseJob?.cancel()
-        downloadJob?.cancel()
+        if (_state.value.downloadState !is DownloadState.Downloading) {
+            DownloadBus.resetIfNotDownloading()
+        }
         val startMs = System.currentTimeMillis()
         _state.update {
             it.copy(
@@ -80,7 +116,7 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
                 stageMessage = "正在识别链接…",
                 elapsedSeconds = null,
                 result = null,
-                downloadState = DownloadState.Idle,
+                previewEnabled = false,
             )
         }
 
@@ -95,6 +131,7 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
                     stageMessage = "",
                     elapsedSeconds = elapsed,
                     result = outcome,
+                    previewEnabled = false,
                 )
             }
         }
@@ -102,15 +139,18 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun downloadCurrent() {
         val video = (_state.value.result as? ExtractResult.Success)?.video ?: return
-        downloadJob?.cancel()
-        _state.update { it.copy(downloadState = DownloadState.Downloading(-1f, 0L, -1L)) }
-        downloadJob = viewModelScope.launch {
-            val finalState = MediaDownloader.downloadToGallery(
-                context = getApplication<Application>().applicationContext,
-                video = video,
-                onProgress = { p -> _state.update { it.copy(downloadState = p) } },
+        // Release ExoPlayer preview before downloading so it doesn't compete for bandwidth or CDN slots.
+        _state.update { it.copy(previewEnabled = false) }
+        DownloadService.start(getApplication<Application>().applicationContext, video)
+    }
+
+    fun cancelDownload() {
+        DownloadService.cancel(getApplication<Application>().applicationContext)
+        _state.update {
+            it.copy(
+                downloadState = DownloadState.Idle,
+                snackbarMessage = "已取消下载并清理临时文件",
             )
-            _state.update { it.copy(downloadState = finalState) }
         }
     }
 
@@ -149,13 +189,16 @@ class ExtractorViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (_: Throwable) {
             // ignore
         }
+        if (_state.value.downloadState !is DownloadState.Downloading) {
+            DownloadBus.resetIfNotDownloading()
+        }
         _state.update {
             it.copy(
                 interactiveBrowserUrl = null,
                 isParsing = false,
                 stageMessage = "",
                 result = ExtractResult.Success(video),
-                downloadState = DownloadState.Idle,
+                previewEnabled = false,
             )
         }
     }

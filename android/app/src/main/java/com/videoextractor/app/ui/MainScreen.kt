@@ -1,10 +1,15 @@
 package com.videoextractor.app.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +31,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -58,18 +64,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
 import com.videoextractor.app.core.HttpClients
 import com.videoextractor.app.model.DownloadState
 import com.videoextractor.app.model.ExtractResult
@@ -81,6 +90,27 @@ fun MainScreen(viewModel: ExtractorViewModel) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { _ ->
+        // Start download regardless; Foreground Service still runs even if notification is denied.
+        viewModel.downloadCurrent()
+    }
+
+    fun requestDownloadWithNotifPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+        viewModel.downloadCurrent()
+    }
 
     LaunchedEffect(state.snackbarMessage) {
         val msg = state.snackbarMessage
@@ -123,7 +153,7 @@ fun MainScreen(viewModel: ExtractorViewModel) {
                     color = SurfaceVariantDark,
                 ) {
                     Text(
-                        text = "PUBLIC UGC ONLY · 本地直提",
+                        text = "PUBLIC UGC ONLY · 本地多线程直提",
                         color = AccentSky,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -144,7 +174,7 @@ fun MainScreen(viewModel: ExtractorViewModel) {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "纯手机本地解析，不经第三方服务器。支持从系统「分享」菜单直接发送到本应用。",
+                text = "纯手机本地多线程加速下载，支持后台/锁屏下载与系统「分享」直达。",
                 color = TextMuted,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
@@ -283,8 +313,11 @@ fun MainScreen(viewModel: ExtractorViewModel) {
                     ResultSuccessCard(
                         video = res.video,
                         elapsedSeconds = state.elapsedSeconds,
+                        previewEnabled = state.previewEnabled,
                         downloadState = state.downloadState,
-                        onDownload = { viewModel.downloadCurrent() },
+                        onEnablePreview = { viewModel.enablePreview() },
+                        onDownload = { requestDownloadWithNotifPermission() },
+                        onCancelDownload = { viewModel.cancelDownload() },
                         onCopyDirect = {
                             copyToClipboard(context, res.video.directUrl)
                             viewModel.showToast("已复制视频直链")
@@ -351,8 +384,11 @@ fun MainScreen(viewModel: ExtractorViewModel) {
 private fun ResultSuccessCard(
     video: ExtractedVideo,
     elapsedSeconds: Double?,
+    previewEnabled: Boolean,
     downloadState: DownloadState,
+    onEnablePreview: () -> Unit,
     onDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
     onCopyDirect: () -> Unit,
     onOpenSaved: (String) -> Unit,
 ) {
@@ -412,35 +448,78 @@ private fun ResultSuccessCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Native ExoPlayer preview with custom headers & local WebView cookies
-            VideoPreviewPlayer(
-                video = video,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(12.dp)),
-            )
+            // Load ExoPlayer strictly on-demand so preview doesn't compete with download bandwidth / CDN limits.
+            if (previewEnabled) {
+                VideoPreviewPlayer(
+                    video = video,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp)),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF090E1A)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (!video.thumbnailUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model = video.thumbnailUrl,
+                            contentDescription = video.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.42f)),
+                        )
+                    }
+                    Button(
+                        onClick = onEnablePreview,
+                        shape = RoundedCornerShape(999.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceDark.copy(alpha = 0.9f)),
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AccentSky, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("点击在线预览", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            val isDownloading = downloadState is DownloadState.Downloading
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Button(
-                    onClick = onDownload,
-                    enabled = downloadState !is DownloadState.Downloading,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null, tint = BgDark, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (downloadState is DownloadState.Downloading) "下载中…" else "保存到相册",
-                        color = BgDark,
-                        fontWeight = FontWeight.Bold,
-                    )
+                if (isDownloading) {
+                    OutlinedButton(
+                        onClick = onCancelDownload,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorCoral),
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("取消下载", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Button(
+                        onClick = onDownload,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, tint = BgDark, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("多线程保存到相册", color = BgDark, fontWeight = FontWeight.Bold)
+                    }
                 }
 
                 OutlinedButton(
@@ -455,7 +534,7 @@ private fun ResultSuccessCard(
 
             when (downloadState) {
                 is DownloadState.Downloading -> {
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     if (downloadState.progress >= 0f) {
                         LinearProgressIndicator(
                             progress = { downloadState.progress },
@@ -474,13 +553,26 @@ private fun ResultSuccessCard(
                             trackColor = SurfaceVariantDark,
                         )
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    val text = if (downloadState.totalBytes > 0) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val pctText = if (downloadState.progress >= 0f) "${(downloadState.progress * 100).toInt()}%" else ""
+                    val speedText = if (downloadState.speedBytesPerSec > 0L) " · ${formatSpeed(downloadState.speedBytesPerSec)}" else ""
+                    val sizeText = if (downloadState.totalBytes > 0L) {
                         "${formatBytes(downloadState.bytesRead)} / ${formatBytes(downloadState.totalBytes)}"
                     } else {
                         "已下载 ${formatBytes(downloadState.bytesRead)}"
                     }
-                    Text(text = text, color = TextMuted, fontSize = 12.sp)
+                    Text(
+                        text = "${downloadState.stage} $pctText · $sizeText$speedText",
+                        color = AccentSky,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "已开启前台保活服务：切到后台或锁屏仍会继续下载，通知栏可随时查看或取消",
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
                 }
 
                 is DownloadState.Saved -> {
@@ -534,7 +626,7 @@ private fun VideoPreviewPlayer(
             .apply {
                 setMediaItem(MediaItem.fromUri(video.directUrl))
                 prepare()
-                playWhenReady = false
+                playWhenReady = true
             }
     }
 
@@ -602,4 +694,10 @@ private fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     if (bytes < 1024 * 1024) return "%.1f KB".format(bytes / 1024.0)
     return "%.1f MB".format(bytes / 1024.0 / 1024.0)
+}
+
+private fun formatSpeed(bps: Long): String {
+    if (bps < 1024) return "$bps B/s"
+    if (bps < 1024 * 1024) return "%.0f KB/s".format(bps / 1024.0)
+    return "%.1f MB/s".format(bps / 1024.0 / 1024.0)
 }
