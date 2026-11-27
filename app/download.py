@@ -110,6 +110,8 @@ def _dl_headers(
     host = hostname_of(page_url or "") or hostname_of(url)
     if any(k in blob for k in ("kuaishou", "chenzhongtech", "kwai.com", "gifshow")):
         referer = "https://www.kuaishou.com/"
+    elif any(k in blob for k in ("goofish", "cloud.video.taobao", "tbvideo")):
+        referer = "https://www.goofish.com/"
     elif "iesdouyin" in blob:
         referer = "https://www.iesdouyin.com/"
     elif "douyin" in blob:

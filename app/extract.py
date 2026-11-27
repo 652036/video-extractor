@@ -8,8 +8,8 @@ import time
 
 from .config import BROWSER_TIMEOUT, CN_OVERALL_TIMEOUT, ENGINE_TIMEOUT, OVERALL_TIMEOUT, SHARE_TIMEOUT
 from .engines import load_engines
-from .urls import expand_share_url, is_cn_short_video, is_douyin, ytdlp_url
-from .util import extract_url, hostname_of, is_blocked
+from .urls import expand_share_url, is_cn_short_video, is_douyin, is_xianyu, ytdlp_url
+from .util import extract_url, hostname_of, is_blocked, platform_of
 
 log = logging.getLogger("unwatermark")
 
@@ -164,15 +164,16 @@ async def extract_media(url: str) -> dict:
 
     named_fallback = {"webparser", "lux"}
     named_share = {"share-page"}
-    named_browser = {"douyin-browser"}
+    named_browser = {"douyin-browser", "xianyu"}
     share = [e for e in engines if (e.name in named_share or _stage_of(e) <= SHARE_STAGE) and matches_any(e)]
     browser = [
         e
         for e in engines
         if (e.name in named_browser or _stage_of(e) == BROWSER_STAGE) and matches_any(e)
     ]
-    core = [e for e in engines if e.name not in named_fallback | named_share | named_browser and matches_any(e)]
     fallback = [e for e in engines if e.name in named_fallback and matches_any(e)]
+    assigned = set(share) | set(browser) | set(fallback)
+    core = [e for e in engines if e not in assigned and matches_any(e)]
 
     # Douyin/Kuaishou: race share-page + public parsers + Chrome guest fetch
     # in the FIRST stage so yt-dlp's needs_cookie cannot eat the budget.
@@ -191,10 +192,11 @@ async def extract_media(url: str) -> dict:
         first_budget = max(first_budget, BROWSER_MIN_S)
     if cn and first:
         stages.append((first, resolved, first_budget, "first"))
-    # Dedicated browser heat if it was not already in first (non-CN / no share).
+    # Dedicated browser/site-specific stage if it was not already in first.
     if browser and not (cn and first and _has_engine(first, "douyin-browser")):
         stages.append((browser, resolved, BROWSER_MIN_S, "browser"))
-    if core:
+    xianyu_only = (is_xianyu(url) or is_xianyu(resolved)) and _has_engine(browser, "xianyu")
+    if core and not xianyu_only:
         stages.append((core, race_url, ENGINE_TIMEOUT, "core"))
     # Only schedule a separate post-core fallback stage if fallback did not already run in first.
     if cn and fallback and not any(e in first for e in fallback):
@@ -285,9 +287,10 @@ async def extract_media(url: str) -> dict:
             "ok": False,
             "error": detail[:400],
             "needs_cookie": True,
+            "platform": platform_of(resolved),
             "hint": hint,
         }
 
     log.info("parse host=%s fail webparser_budget=%.1fs", host, webparser_budget)
     detail = "；".join(errors[:8]) if errors else "所有引擎均未能解析"
-    return {"ok": False, "error": detail[:400]}
+    return {"ok": False, "error": detail[:400], "platform": platform_of(resolved)}

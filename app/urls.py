@@ -17,6 +17,7 @@ SHORT_LINK_HOSTS = {
     "vm.tiktok.com",
     "vt.tiktok.com",
     "t.cn",
+    "m.tb.cn",
 }
 
 AWEME_RE = re.compile(
@@ -25,6 +26,14 @@ AWEME_RE = re.compile(
 )
 PHOTO_RE = re.compile(
     r"/(?:short-video|fw/photo|photo|f)/([A-Za-z0-9_-]+)|[?&]photoId=([A-Za-z0-9_-]+)",
+    re.I,
+)
+XIANYU_ID_RE = re.compile(
+    r"[?&](?:itemId|id)=(\d+)|/item/(\d+)|share\.detail\.(\d+)",
+    re.I,
+)
+TB_JS_URL_RE = re.compile(
+    r"""(?:var\s+url\s*=|location\.href\s*=)\s*['"](https?://[^'"]+)['"]""",
     re.I,
 )
 
@@ -45,6 +54,19 @@ def is_kuaishou(url: str) -> bool:
     )
 
 
+def is_xianyu(url: str) -> bool:
+    host = hostname_of(url)
+    if host == "goofish.com" or host.endswith(".goofish.com"):
+        return True
+    if host == "2.taobao.com":
+        return True
+    if (host == "taobao.com" or host.endswith(".taobao.com")) and any(
+        k in (url or "").lower() for k in ("idlefish", "xianyu", "goofish")
+    ):
+        return True
+    return False
+
+
 def is_cn_short_video(url: str) -> bool:
     return is_douyin(url) or is_kuaishou(url)
 
@@ -63,6 +85,39 @@ def photo_id_of(url: str) -> str | None:
     return next((g for g in m.groups() if g), None)
 
 
+def xianyu_item_id_of(url: str) -> str | None:
+    m = XIANYU_ID_RE.search(url or "")
+    if not m:
+        return None
+    return next((g for g in m.groups() if g), None)
+
+
+def extract_tb_js_redirect(html: str) -> str | None:
+    m = TB_JS_URL_RE.search(html or "")
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _follow_tb_short(url: str, timeout: float = 10.0) -> str:
+    """m.tb.cn short links embed the target URL in JS `var url = '...'` instead of HTTP 302."""
+    try:
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers={"User-Agent": MOBILE_UA}) as client:
+            with client.stream("GET", url) as resp:
+                final = str(resp.url) or url
+                if hostname_of(final) != "m.tb.cn" and not hostname_of(final).endswith(".tb.cn"):
+                    return final
+                buf = bytearray()
+                for chunk in resp.iter_bytes(8192):
+                    buf.extend(chunk)
+                    if len(buf) >= 32768:
+                        break
+        target = extract_tb_js_redirect(buf.decode("utf-8", errors="replace"))
+        return target or final
+    except Exception:
+        return url
+
+
 def _follow(url: str, ua: str, timeout: float = 10.0) -> str:
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout, headers={"User-Agent": ua}) as client:
@@ -73,12 +128,20 @@ def _follow(url: str, ua: str, timeout: float = 10.0) -> str:
 
 
 def expand_share_url(url: str) -> str:
-    """Follow v.douyin.com / v.kuaishou.com and common short-link redirects. Safe no-op on failure."""
+    """Follow v.douyin.com / v.kuaishou.com / m.tb.cn and common short-link redirects. Safe no-op on failure."""
     host = hostname_of(url)
-    if host in SHORT_LINK_HOSTS or host.startswith("v."):
+    if host == "m.tb.cn" or host.endswith(".tb.cn"):
+        followed = _follow_tb_short(url)
+        if followed:
+            url = followed
+    elif host in SHORT_LINK_HOSTS or host.startswith("v."):
         followed = _follow(url, MOBILE_UA if is_douyin(url) or is_kuaishou(url) else UA)
         if followed:
             url = followed
+    if is_xianyu(url):
+        iid = xianyu_item_id_of(url)
+        if iid:
+            return f"https://www.goofish.com/item?id={iid}"
     if is_kuaishou(url):
         pid = photo_id_of(url)
         if pid and ("chenzhongtech.com" in hostname_of(url) or hostname_of(url).startswith("v.")):
@@ -101,6 +164,11 @@ def variants_for(url: str) -> list[str]:
 
     add(url)
     add(expanded)
+    if is_xianyu(url) or is_xianyu(expanded):
+        iid = xianyu_item_id_of(expanded) or xianyu_item_id_of(url)
+        if iid:
+            add(f"https://www.goofish.com/item?id={iid}")
+            add(f"https://h5.m.goofish.com/item?id={iid}")
     if is_douyin(url) or is_douyin(expanded):
         aid = aweme_id_of(expanded) or aweme_id_of(url)
         if aid:
@@ -118,6 +186,10 @@ def variants_for(url: str) -> list[str]:
 def ytdlp_url(url: str, expanded: str | None = None) -> str:
     """yt-dlp DouyinIE only matches www.douyin.com/video/<id>."""
     expanded = expanded or url
+    if is_xianyu(url) or is_xianyu(expanded):
+        iid = xianyu_item_id_of(expanded) or xianyu_item_id_of(url)
+        if iid:
+            return f"https://www.goofish.com/item?id={iid}"
     if is_douyin(url) or is_douyin(expanded):
         aid = aweme_id_of(expanded) or aweme_id_of(url)
         if aid:
