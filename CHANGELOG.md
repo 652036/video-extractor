@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) where tagged.
 
+## [1.1.0]
+
+### Added
+
+- Standalone Android APK (`android/`, Kotlin + Jetpack Compose + OkHttp + Media3 ExoPlayer + WebView sniffer) running fully on-device without a backend server (~2.2 MB Release APK).
+- On-device native extractors for Douyin, Kuaishou, Xianyu (`m.tb.cn` + H5/PC MTOP), Xiaohongshu, Bilibili, YouTube, TikTok, X (Twitter), Instagram, Facebook, Reddit, Vimeo, and generic HTML/direct media.
+- System Share menu (`ACTION_SEND`) integration, in-app ExoPlayer preview, MediaStore gallery download (`Movies/VideoExtractor`), and interactive local WebView login/sniffer dialog.
+- Android JUnit test suite (16 tests) and GitHub Actions workflow (`.github/workflows/android.yml`) building and publishing `video-extractor-android.apk`.
+
 ## [1.0.0]
 
 ### Added

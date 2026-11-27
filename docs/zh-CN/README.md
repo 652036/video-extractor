@@ -51,6 +51,10 @@ cd video-extractor
 
 启动后访问 **http://127.0.0.1:8787**。
 
+### Android APK（纯手机本地直提）
+
+项目内置独立的 Kotlin / Jetpack Compose 安卓客户端（[android/](../../android/)），**无需外部服务器**，直接在手机本地完成抖音、快手、闲鱼、小红书、B站、YouTube、TikTok、X、Instagram、Facebook、Reddit、Vimeo 与通用网页视频提取，支持系统「分享」直达、内置浏览器本地登录/嗅探、ExoPlayer 预览及一键保存相册。详见 [android/README.md](../../android/README.md)，或在 [Releases](https://github.com/652036/video-extractor/releases) 下载最新 APK。
+
 手动安装（任意系统）：
 
 ```bash
