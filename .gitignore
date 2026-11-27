@@ -34,3 +34,11 @@ smoke_*.py
 .idea/
 .vscode/
 *.swp
+
+# Android
+android/.gradle/
+android/local.properties
+android/**/build/
+android/captures/
+*.jks
+*.keystore

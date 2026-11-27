@@ -51,6 +51,10 @@ cd video-extractor
 
 Open **http://127.0.0.1:8787**.
 
+### Android APK (standalone on-device)
+
+A standalone Kotlin / Jetpack Compose Android app lives in [android/](android/) (no server required — runs directly on your phone with OkHttp + built-in WebView sniffer + ExoPlayer preview + MediaStore gallery download + system Share menu support). See [android/README.md](android/README.md) or download the latest APK from [Releases](https://github.com/652036/video-extractor/releases).
+
 Manual install (any OS):
 
 ```bash
