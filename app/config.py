@@ -115,6 +115,8 @@ PLATFORM_HINTS = (
     ("gifshow.com", "快手"),
     ("xiaohongshu.com", "小红书"),
     ("xhslink.com", "小红书"),
+    ("goofish.com", "闲鱼"),
+    ("2.taobao.com", "闲鱼"),
     ("weibo.com", "微博"),
     ("weibo.cn", "微博"),
     ("video.weibo.com", "微博"),

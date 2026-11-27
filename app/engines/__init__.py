@@ -27,6 +27,12 @@ def load_engines() -> list:
         engines.append(SharePageEngine())
     except Exception:
         pass
+    try:
+        from .xianyu import XianyuEngine
+
+        engines.append(XianyuEngine())
+    except Exception:
+        pass
     from .ytdlp import YtDlpEngine
 
     engines.append(YtDlpEngine())

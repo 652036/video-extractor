@@ -147,3 +147,61 @@ def httpx_cookie_dict(opts: CookieOpts | None = None) -> dict[str, str]:
         if name:
             out[name] = value
     return out
+
+
+def _domain_matches(cookie_domain: str, suffixes: tuple[str, ...]) -> bool:
+    host = (cookie_domain or "").strip().lower().lstrip(".")
+    if not host:
+        return False
+    return any(host == s or host.endswith("." + s) for s in suffixes)
+
+
+def cookies_for_domains(domains: tuple[str, ...], opts: CookieOpts | None = None) -> list[dict]:
+    """Load structured cookies ({name, value, domain, path}) matching domain suffixes.
+
+    Supports both Netscape cookiefile and local cookies_from_browser (via yt-dlp).
+    """
+    opts = opts or current()
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def push(name: str, value: str, domain: str, path: str = "/") -> None:
+        if not name or not _domain_matches(domain, domains):
+            return
+        key = (domain.lower(), path or "/", name)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"name": name, "value": value, "domain": domain, "path": path or "/"})
+
+    if opts.cookiefile:
+        try:
+            text = Path(opts.cookiefile).read_text(encoding="utf-8", errors="replace")
+            for raw in text.splitlines():
+                line = raw[len("#HttpOnly_") :] if raw.startswith("#HttpOnly_") else raw
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                push(parts[5], parts[6], parts[0], parts[2])
+        except OSError:
+            pass
+
+    if not out and opts.cookies_from_browser:
+        try:
+            from yt_dlp.cookies import extract_cookies_from_browser
+
+            spec = [p if p else None for p in opts.cookies_from_browser.split(":")]
+            browser_name = spec[0]
+            profile = spec[1] if len(spec) > 1 else None
+            keyring = spec[2] if len(spec) > 2 else None
+            container = spec[3] if len(spec) > 3 else None
+            if browser_name:
+                jar = extract_cookies_from_browser(browser_name, profile=profile, keyring=keyring, container=container)
+                for c in jar:
+                    push(c.name, c.value or "", c.domain or "", c.path or "/")
+        except Exception as exc:
+            log.info("cookies_from_browser extract skip: %s", str(exc)[:120])
+
+    return out

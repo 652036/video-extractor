@@ -82,6 +82,7 @@ def platform_of(url: str, extractor_key: str | None = None) -> str:
             "BiliBili": "哔哩哔哩",
             "Kuaishou": "快手",
             "XiaoHongShu": "小红书",
+            "Xianyu": "闲鱼",
             "Weibo": "微博",
             "Instagram": "Instagram",
             "Twitter": "X",
